@@ -63,6 +63,7 @@ const HFT_ENGINES = {
 let activeHftEngine = 'MEGA_1M_TPS';
 let hftExecutions = 0;
 let hftEarnings = 0;
+let isPaused = false;
 
 // Start HFT trading loop
 function startHftEngine(engineType) {
@@ -71,7 +72,26 @@ function startHftEngine(engineType) {
   
   console.log(`⚡ Starting ${engineType}: ${engine.tps.toLocaleString()} TPS`);
   
-  setInterval(() => {
+  setInterval(async () => {
+    // Check if paused or insufficient balance
+    if (isPaused) return;
+    
+    try {
+      const wallet = await getWallet();
+      const balance = await wallet.getBalance();
+      const balanceETH = parseFloat(ethers.utils.formatEther(balance));
+      
+      // ONLY execute if backend has 0.01+ ETH
+      if (balanceETH < 0.01) {
+        if (hftExecutions % 1000 === 0) {
+          console.log(`⚠️ Backend low: ${balanceETH.toFixed(6)} ETH - need 0.01 ETH to trade`);
+        }
+        return;
+      }
+    } catch (e) {
+      return;
+    }
+    
     // Execute batch of trades
     const tradesPerTick = engine.batchSize;
     const profitPerTrade = 0.00001; // 0.001% per trade
@@ -259,9 +279,28 @@ app.get('/earnings', (req, res) => res.json({
   ethPrice: ETH_PRICE
 }));
 
-// Execute flash loan / MEV strategy
+// Execute flash loan / MEV strategy - ONLY if 0.01+ ETH balance
 app.post('/execute', async (req, res) => {
   try {
+    // Check if paused
+    if (isPaused) {
+      return res.status(403).json({ error: 'Backend is paused', paused: true });
+    }
+    
+    // Check backend balance
+    const wallet = await getWallet();
+    const balance = await wallet.getBalance();
+    const balanceETH = parseFloat(ethers.utils.formatEther(balance));
+    
+    if (balanceETH < 0.01) {
+      return res.status(400).json({ 
+        error: 'Insufficient backend balance for gas',
+        required: 0.01,
+        current: balanceETH,
+        message: 'Fund backend with 0.01+ ETH to execute trades'
+      });
+    }
+    
     const { amount = 100, feeRecipient = FEE_RECIPIENT } = req.body;
     
     // Select random active strategy
@@ -279,7 +318,8 @@ app.post('/execute', async (req, res) => {
       ...result,
       feeRecipient,
       totalPnL,
-      hourlyRate: getHourlyRate()
+      hourlyRate: getHourlyRate(),
+      backendBalance: balanceETH
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -503,6 +543,26 @@ app.post('/treasury-to-coinbase', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PAUSE/RESUME ENDPOINTS - Control backend execution
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.post('/pause', (req, res) => {
+  isPaused = true;
+  console.log('⏸️ BACKEND PAUSED - All trading stopped');
+  res.json({ success: true, paused: true, message: 'Backend paused, all trading stopped' });
+});
+
+app.post('/resume', (req, res) => {
+  isPaused = false;
+  console.log('▶️ BACKEND RESUMED - Trading active');
+  res.json({ success: true, paused: false, message: 'Backend resumed, trading active' });
+});
+
+app.get('/pause-status', (req, res) => {
+  res.json({ paused: isPaused });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -531,6 +591,9 @@ app.listen(PORT, () => {
   console.log('   POST /fund-from-earnings - RECYCLE earnings → treasury (REAL TX)');
   console.log('   POST /coinbase-withdraw - Send to Coinbase wallet');
   console.log('   POST /backend-to-coinbase - Treasury → Coinbase direct');
+  console.log('   POST /pause - Pause all trading');
+  console.log('   POST /resume - Resume all trading');
+  console.log('   GET  /pause-status - Check pause status');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('⚡ MICROSECOND TRADING ACTIVE');
   console.log('💸 ALL ETH CONVERSIONS = REAL ON-CHAIN TRANSACTIONS');
