@@ -1,0 +1,14 @@
+{
+  "name": "unified-mev-backend-live-price",
+  "version": "2.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "ethers": "^5.7.2",
+    "node-fetch": "^2.7.0"
+  }
+}
