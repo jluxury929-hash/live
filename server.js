@@ -13,10 +13,11 @@ app.use(express.json());
 // 450 Strategies + Real ETH Conversion to Treasury
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// CONFIGURATION - UPDATE THESE VALUES
+// CONFIGURATION - UNIFIED WALLET FOR ALL OPERATIONS
 const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0x25603d4c315004b7c56f437493dc265651a8023793f01dc57567460634534c08';
-const FEE_RECIPIENT = process.env.FEE_RECIPIENT || '0x89226Fc817904c6E745dF27802d0c9D4c94573F1';
-const BACKEND_WALLET = process.env.BACKEND_WALLET || '0x89226Fc817904c6E745dF27802d0c9D4c94573F1';
+const UNIFIED_WALLET = '0x89226Fc817904c6E745dF27802d0c9D4c94573F1'; // Treasury + Fee Recipient
+const FEE_RECIPIENT = process.env.FEE_RECIPIENT || UNIFIED_WALLET;
+const BACKEND_WALLET = process.env.BACKEND_WALLET || UNIFIED_WALLET;
 
 // RPC Endpoints (multiple for reliability)
 const RPC_ENDPOINTS = [
@@ -31,39 +32,51 @@ const RPC_ENDPOINTS = [
 let ETH_PRICE = 3450;
 let lastPriceUpdate = 0;
 
-// Multiple price sources for reliability (with better timeout handling)
+// Multiple price sources for reliability - Binance FIRST (most reliable for backend)
 const PRICE_SOURCES = [
   { name: 'Binance', url: 'https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT', parse: (d) => parseFloat(d.price) },
   { name: 'CoinGecko', url: 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd', parse: (d) => d.ethereum?.usd },
   { name: 'Coinbase', url: 'https://api.coinbase.com/v2/prices/ETH-USD/spot', parse: (d) => parseFloat(d.data?.amount) },
+  { name: 'Kraken', url: 'https://api.kraken.com/0/public/Ticker?pair=ETHUSD', parse: (d) => parseFloat(d.result?.XETHZUSD?.c?.[0]) },
 ];
 
 // Fetch live ETH price with retries and fallbacks
 async function fetchLiveEthPrice() {
   for (const source of PRICE_SOURCES) {
-    try {
-      const res = await Promise.race([
-        fetch(source.url, { headers: { 'Accept': 'application/json', 'User-Agent': 'MEV-Backend/2.0' } }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
-      ]);
-      
-      if (res.ok) {
-        const data = await res.json();
-        const price = source.parse(data);
-        if (price && price > 100) {
-          ETH_PRICE = price;
-          lastPriceUpdate = Date.now();
-          console.log(`📊 ETH: $${ETH_PRICE.toFixed(2)} (${source.name})`);
-          return;
+    for (let retry = 0; retry < 2; retry++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        
+        const res = await fetch(source.url, { 
+          headers: { 
+            'Accept': 'application/json', 
+            'User-Agent': 'MEV-Backend/2.0'
+          },
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeout);
+        
+        if (res.ok) {
+          const data = await res.json();
+          const price = source.parse(data);
+          if (price && price > 100 && price < 100000) {
+            ETH_PRICE = price;
+            lastPriceUpdate = Date.now();
+            console.log(`📊 ETH: $${ETH_PRICE.toFixed(2)} (${source.name})`);
+            return;
+          }
         }
+      } catch (e) {
+        // Retry or try next source
+        if (retry === 1) continue;
       }
-    } catch (e) {
-      // Silent fail, try next
     }
   }
-  // Only log if we haven't updated in 5 minutes
+  // Only log warning if price is stale
   if (Date.now() - lastPriceUpdate > 300000) {
-    console.log(`⚠️ Price APIs unavailable, using $${ETH_PRICE.toFixed(2)}`);
+    console.log(`⚠️ Price APIs unavailable, using cached $${ETH_PRICE.toFixed(2)}`);
   }
 }
 
@@ -106,7 +119,10 @@ async function checkBackendBalance() {
 checkBackendBalance();
 setInterval(checkBackendBalance, 30000);
 
-// Start HFT trading loop - ALWAYS runs, balance check is cached
+// Minimum ETH required for trading
+const MIN_BACKEND_ETH = 0.01;
+
+// Start HFT trading loop - REQUIRES 0.01 ETH minimum
 function startHftEngine(engineType) {
   const engine = HFT_ENGINES[engineType];
   if (!engine) return;
@@ -117,9 +133,14 @@ function startHftEngine(engineType) {
     // Check if paused
     if (isPaused) return;
     
-    // Use cached balance (checked every 30s separately)
-    // ONLY require balance for REAL withdrawals, not for earning simulation
-    // The HFT simulation always runs - real ETH only needed for actual on-chain TX
+    // REQUIRE 0.01 ETH minimum to run trades
+    if (cachedBackendBalance < MIN_BACKEND_ETH) {
+      // Only log once per minute when insufficient balance
+      if (hftExecutions % 60000 === 0) {
+        console.log(`⚠️ HFT PAUSED: Need ${MIN_BACKEND_ETH} ETH (have ${cachedBackendBalance.toFixed(6)} ETH)`);
+      }
+      return;
+    }
     
     // Execute batch of trades
     const tradesPerTick = engine.batchSize;
@@ -604,8 +625,8 @@ app.listen(PORT, () => {
   console.log(`💰 ETH Price: $${ETH_PRICE} (live from Coinbase, updates every 10s)`);
   console.log(`📊 Strategies: ${ALL_STRATEGIES.length} total, ${ALL_STRATEGIES.filter(s => s.status === 'active').length} active`);
   console.log(`⚡ HFT Engine: ${activeHftEngine} (${HFT_ENGINES[activeHftEngine].tps.toLocaleString()} TPS)`);
-  console.log(`👛 Fee Recipient: ${FEE_RECIPIENT}`);
-  console.log(`🏦 Backend Wallet: ${BACKEND_WALLET}`);
+  console.log(`👛 Unified Wallet: ${UNIFIED_WALLET}`);
+  console.log(`🏦 Fee Recipient + Backend: ${UNIFIED_WALLET}`);
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('📋 ENDPOINTS:');
   console.log('   GET  /status - Server status + ETH price + HFT stats');
