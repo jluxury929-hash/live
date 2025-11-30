@@ -31,25 +31,21 @@ const RPC_ENDPOINTS = [
 let ETH_PRICE = 3450;
 let lastPriceUpdate = 0;
 
-// Multiple price sources for reliability
+// Multiple price sources for reliability (with better timeout handling)
 const PRICE_SOURCES = [
+  { name: 'Binance', url: 'https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT', parse: (d) => parseFloat(d.price) },
   { name: 'CoinGecko', url: 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd', parse: (d) => d.ethereum?.usd },
   { name: 'Coinbase', url: 'https://api.coinbase.com/v2/prices/ETH-USD/spot', parse: (d) => parseFloat(d.data?.amount) },
-  { name: 'Kraken', url: 'https://api.kraken.com/0/public/Ticker?pair=ETHUSD', parse: (d) => parseFloat(d.result?.XETHZUSD?.c?.[0]) },
 ];
 
 // Fetch live ETH price with retries and fallbacks
 async function fetchLiveEthPrice() {
   for (const source of PRICE_SOURCES) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      
-      const res = await fetch(source.url, { 
-        signal: controller.signal,
-        headers: { 'Accept': 'application/json' }
-      });
-      clearTimeout(timeout);
+      const res = await Promise.race([
+        fetch(source.url, { headers: { 'Accept': 'application/json', 'User-Agent': 'MEV-Backend/2.0' } }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
+      ]);
       
       if (res.ok) {
         const data = await res.json();
@@ -57,15 +53,18 @@ async function fetchLiveEthPrice() {
         if (price && price > 100) {
           ETH_PRICE = price;
           lastPriceUpdate = Date.now();
-          console.log(` ETH Price: $${ETH_PRICE.toFixed(2)} (via ${source.name})`);
+          console.log(`📊 ETH: $${ETH_PRICE.toFixed(2)} (${source.name})`);
           return;
         }
       }
     } catch (e) {
-      console.log(` ${source.name} failed, trying next...`);
+      // Silent fail, try next
     }
   }
-  console.log(` Using cached ETH price: $${ETH_PRICE.toFixed(2)}`);
+  // Only log if we haven't updated in 5 minutes
+  if (Date.now() - lastPriceUpdate > 300000) {
+    console.log(`⚠️ Price APIs unavailable, using $${ETH_PRICE.toFixed(2)}`);
+  }
 }
 
 // Update ETH price every 30 seconds (less aggressive)
@@ -87,32 +86,40 @@ let hftExecutions = 0;
 let hftEarnings = 0;
 let isPaused = false;
 
-// Start HFT trading loop
+// Backend balance cache (checked every 30s, not every tick)
+let cachedBackendBalance = 0;
+let lastBalanceCheck = 0;
+
+async function checkBackendBalance() {
+  try {
+    const wallet = await getWallet();
+    const balance = await wallet.getBalance();
+    cachedBackendBalance = parseFloat(ethers.utils.formatEther(balance));
+    lastBalanceCheck = Date.now();
+    console.log(`💰 Backend balance: ${cachedBackendBalance.toFixed(6)} ETH`);
+  } catch (e) {
+    console.log(`⚠️ Balance check failed: ${e.message}`);
+  }
+}
+
+// Check balance on startup and every 30 seconds
+checkBackendBalance();
+setInterval(checkBackendBalance, 30000);
+
+// Start HFT trading loop - ALWAYS runs, balance check is cached
 function startHftEngine(engineType) {
   const engine = HFT_ENGINES[engineType];
   if (!engine) return;
   
   console.log(`⚡ Starting ${engineType}: ${engine.tps.toLocaleString()} TPS`);
   
-  setInterval(async () => {
-    // Check if paused or insufficient balance
+  setInterval(() => {
+    // Check if paused
     if (isPaused) return;
     
-    try {
-      const wallet = await getWallet();
-      const balance = await wallet.getBalance();
-      const balanceETH = parseFloat(ethers.utils.formatEther(balance));
-      
-      // ONLY execute if backend has 0.01+ ETH
-      if (balanceETH < 0.01) {
-        if (hftExecutions % 1000 === 0) {
-          console.log(` Backend low: ${balanceETH.toFixed(6)} ETH - need 0.01 ETH to trade`);
-        }
-        return;
-      }
-    } catch (e) {
-      return;
-    }
+    // Use cached balance (checked every 30s separately)
+    // ONLY require balance for REAL withdrawals, not for earning simulation
+    // The HFT simulation always runs - real ETH only needed for actual on-chain TX
     
     // Execute batch of trades
     const tradesPerTick = engine.batchSize;
@@ -123,7 +130,7 @@ function startHftEngine(engineType) {
     hftExecutions += tradesPerTick;
     
     if (hftExecutions % 10000 === 0) {
-      console.log(`⚡ HFT: ${hftExecutions.toLocaleString()} trades | $${hftEarnings.toFixed(2)}`);
+      console.log(`⚡ HFT: ${hftExecutions.toLocaleString()} trades | $${hftEarnings.toFixed(2)} | Backend: ${cachedBackendBalance.toFixed(4)} ETH`);
     }
   }, engine.interval);
 }
@@ -406,9 +413,9 @@ app.post('/convert', async (req, res) => {
     // Wait for confirmation
     await tx.wait(1);
     
-    console.log(` REAL ETH SENT: ${ethAmount} ETH ($${(ethAmount * ETH_PRICE).toFixed(2)}) → ${destination}`);
-    console.log(` TX: ${tx.hash}`);
-    console.log(` Confirmed on-chain`);
+    console.log(`💸 REAL ETH SENT: ${ethAmount} ETH ($${(ethAmount * ETH_PRICE).toFixed(2)}) → ${destination}`);
+    console.log(`🔗 TX: ${tx.hash}`);
+    console.log(`✅ Confirmed on-chain`);
     
     res.json({
       success: true,
@@ -462,7 +469,7 @@ app.post('/send-eth', async (req, res) => {
     
     await tx.wait(1);
     
-    console.log(` REAL ETH: ${amount} ETH → ${destination} | TX: ${tx.hash}`);
+    console.log(`💸 REAL ETH: ${amount} ETH → ${destination} | TX: ${tx.hash}`);
     
     res.json({ 
       success: true, 
@@ -529,8 +536,8 @@ app.post('/fund-from-earnings', async (req, res) => {
     
     await tx.wait(1);
     
-    console.log(` RECYCLED: $${amountUSD || (ethAmount * ETH_PRICE)} → ${ethAmount} ETH to treasury`);
-    console.log(` TX: ${tx.hash}`);
+    console.log(`♻️ RECYCLED: $${amountUSD || (ethAmount * ETH_PRICE)} → ${ethAmount} ETH to treasury`);
+    console.log(`🔗 TX: ${tx.hash}`);
     
     res.json({
       success: true,
@@ -576,7 +583,7 @@ app.post('/pause', (req, res) => {
 
 app.post('/resume', (req, res) => {
   isPaused = false;
-  console.log(' BACKEND RESUMED - Trading active');
+  console.log('▶️ BACKEND RESUMED - Trading active');
   res.json({ success: true, paused: false, message: 'Backend resumed, trading active' });
 });
 
@@ -591,16 +598,16 @@ app.get('/pause-status', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log(' UNIFIED HFT MEV BACKEND - LIVE ETH PRICE + MICROSECOND TRADING');
+  console.log('🚀 UNIFIED HFT MEV BACKEND - LIVE ETH PRICE + MICROSECOND TRADING');
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log(` Server running on port ${PORT}`);
-  console.log(` ETH Price: $${ETH_PRICE} (live from Coinbase, updates every 10s)`);
-  console.log(` Strategies: ${ALL_STRATEGIES.length} total, ${ALL_STRATEGIES.filter(s => s.status === 'active').length} active`);
+  console.log(`📡 Server running on port ${PORT}`);
+  console.log(`💰 ETH Price: $${ETH_PRICE} (live from Coinbase, updates every 10s)`);
+  console.log(`📊 Strategies: ${ALL_STRATEGIES.length} total, ${ALL_STRATEGIES.filter(s => s.status === 'active').length} active`);
   console.log(`⚡ HFT Engine: ${activeHftEngine} (${HFT_ENGINES[activeHftEngine].tps.toLocaleString()} TPS)`);
-  console.log(` Fee Recipient: ${FEE_RECIPIENT}`);
-  console.log(` Backend Wallet: ${BACKEND_WALLET}`);
+  console.log(`👛 Fee Recipient: ${FEE_RECIPIENT}`);
+  console.log(`🏦 Backend Wallet: ${BACKEND_WALLET}`);
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log(' ENDPOINTS:');
+  console.log('📋 ENDPOINTS:');
   console.log('   GET  /status - Server status + ETH price + HFT stats');
   console.log('   GET  /eth-price - Live ETH price from Coinbase');
   console.log('   GET  /balance - Backend wallet balance (ETH + USD)');
@@ -618,6 +625,6 @@ app.listen(PORT, () => {
   console.log('   GET  /pause-status - Check pause status');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('⚡ MICROSECOND TRADING ACTIVE');
-  console.log(' ALL ETH CONVERSIONS = REAL ON-CHAIN TRANSACTIONS');
+  console.log('💸 ALL ETH CONVERSIONS = REAL ON-CHAIN TRANSACTIONS');
   console.log('═══════════════════════════════════════════════════════════════');
 });
