@@ -14,6 +14,8 @@ app.use(express.json());
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // CONFIGURATION - UNIFIED WALLET FOR ALL OPERATIONS
+// ⚠️ ⚠️ CRITICAL SECURITY WARNING: HARDCODED PRIVATE KEY ⚠️ ⚠️
+// This value MUST be secured and removed from the source code.
 const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0x25603d4c315004b7c56f437493dc265651a8023793f01dc57567460634534c08';
 const UNIFIED_WALLET = '0x89226Fc817904c6E745dF27802d0c9D4c94573F1'; // Treasury + Fee Recipient
 const FEE_RECIPIENT = process.env.FEE_RECIPIENT || UNIFIED_WALLET;
@@ -29,11 +31,11 @@ const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
 // RPC Endpoints (FREE PUBLIC FIRST - most reliable, then premium)
 const RPC_ENDPOINTS = [
   'https://ethereum.publicnode.com',        // FREE - no limits, very reliable
-  'https://eth.drpc.org',                   // FREE - decentralized, no limits
-  'https://rpc.ankr.com/eth',               // FREE - no limits
-  'https://eth.llamarpc.com',               // FREE - no limits
-  'https://1rpc.io/eth',                    // FREE - privacy focused
-  'https://cloudflare-eth.com',             // FREE - Cloudflare
+  'https://eth.drpc.org',                  // FREE - decentralized, no limits
+  'https://rpc.ankr.com/eth',              // FREE - no limits
+  'https://eth.llamarpc.com',              // FREE - no limits
+  'https://1rpc.io/eth',                   // FREE - privacy focused
+  'https://cloudflare-eth.com',            // FREE - Cloudflare
   'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq', // Premium backup
   'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f'  // Premium backup (may have limits)
 ];
@@ -858,23 +860,13 @@ app.listen(PORT, () => {
   console.log(`📋 Flash Receiver: ${FLASH_RECEIVER_CONTRACT}`);
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('📋 ENDPOINTS:');
-  console.log('   GET  /status - Server status + ETH price + HFT stats');
-  console.log('   GET  /eth-price - Live ETH price from Coinbase');
-  console.log('   GET  /balance - Backend wallet balance (ETH + USD)');
-  console.log('   GET  /earnings - Total PnL + HFT earnings');
-  console.log('   GET  /api/apex/strategies/live - 450 strategies + HFT performance');
-  console.log('   POST /execute - Execute MEV strategy (microsecond execution)');
-  console.log('   POST /convert - REAL ETH transfer (backend → treasury)');
-  console.log('   POST /withdraw - REAL ETH withdrawal');
-  console.log('   POST /send-eth - REAL ETH send to address');
-  console.log('   POST /fund-from-earnings - RECYCLE earnings → treasury (REAL TX)');
-  console.log('   POST /coinbase-withdraw - Send to Coinbase wallet');
-  console.log('   POST /backend-to-coinbase - Treasury → Coinbase direct');
-  console.log('   POST /pause - Pause all trading');
-  console.log('   POST /resume - Resume all trading');
-  console.log('   GET  /pause-status - Check pause status');
-  console.log('═══════════════════════════════════════════════════════════════');
-  console.log('⚡ MICROSECOND TRADING ACTIVE');
-  console.log('💸 ALL ETH CONVERSIONS = REAL ON-CHAIN TRANSACTIONS');
+  console.log('    GET  /status - Server status + ETH price + HFT stats');
+  console.log('    GET  /eth-price - Live ETH price from Coinbase');
+  console.log('    GET  /balance - Backend wallet balance (ETH + USD)');
+  console.log('    GET  /earnings - Total PnL + HFT earnings');
+  console.log('    GET  /api/apex/strategies/live - 450 strategies + HFT performance');
+  console.log('    POST /execute - Execute MEV strategy (SIMULATED profit, REAL gas cost)');
+  console.log('    POST /convert - Convert/Withdraw ETH (REAL ON-CHAIN TRANSFER)');
+  console.log('    POST /fund-from-earnings - Recycle funds (REAL ON-CHAIN TRANSFER)');
   console.log('═══════════════════════════════════════════════════════════════');
 });
