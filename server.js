@@ -19,14 +19,20 @@ const UNIFIED_WALLET = '0x89226Fc817904c6E745dF27802d0c9D4c94573F1'; // Treasury
 const FEE_RECIPIENT = process.env.FEE_RECIPIENT || UNIFIED_WALLET;
 const BACKEND_WALLET = process.env.BACKEND_WALLET || UNIFIED_WALLET;
 
-// RPC Endpoints (multiple for reliability)
+// RPC Endpoints (FREE PUBLIC FIRST - most reliable, then premium)
 const RPC_ENDPOINTS = [
-  'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq',
-  'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f',
-  'https://ethereum.publicnode.com',
-  'https://eth.drpc.org',
-  'https://rpc.ankr.com/eth'
+  'https://ethereum.publicnode.com',        // FREE - no limits, very reliable
+  'https://eth.drpc.org',                   // FREE - decentralized, no limits
+  'https://rpc.ankr.com/eth',               // FREE - no limits
+  'https://eth.llamarpc.com',               // FREE - no limits
+  'https://1rpc.io/eth',                    // FREE - privacy focused
+  'https://cloudflare-eth.com',             // FREE - Cloudflare
+  'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq', // Premium backup
+  'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f'  // Premium backup (may have limits)
 ];
+
+// Etherscan API for balance fallback
+const ETHERSCAN_API_KEY = 'ZJJ7F4VVHUUSTMSIJ2PPYC3ARC4GYDE37N';
 
 // Live ETH Price - Updated every 30 seconds with multiple fallback sources
 let ETH_PRICE = 3450;
@@ -134,21 +140,54 @@ async function getWallet() {
   return new ethers.Wallet(TREASURY_PRIVATE_KEY, provider);
 }
 
+// Fallback: Get balance via Etherscan API (more reliable than some RPCs)
+async function getBalanceViaEtherscan(address) {
+  try {
+    const url = `https://api.etherscan.io/api?module=account&action=balance&address=${address}&tag=latest&apikey=${ETHERSCAN_API_KEY}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (data.status === '1' && data.result) {
+      return parseFloat(data.result) / 1e18;
+    }
+  } catch (e) {
+    console.log(`⚠️ Etherscan fallback failed: ${e.message}`);
+  }
+  return null;
+}
+
 async function checkBackendBalance() {
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   console.log(`🔍 CHECKING BACKEND BALANCE...`);
   
   try {
+    // Try RPC first
     const wallet = await getWallet();
     console.log(`📡 RPC Connected: ${connectedRpc}`);
     console.log(`👛 Wallet: ${wallet.address}`);
     
-    const balance = await wallet.getBalance();
-    cachedBackendBalance = parseFloat(ethers.utils.formatEther(balance));
+    let balanceETH = 0;
+    try {
+      const balance = await wallet.getBalance();
+      balanceETH = parseFloat(ethers.utils.formatEther(balance));
+      console.log(`💰 Balance (RPC): ${balanceETH.toFixed(6)} ETH`);
+    } catch (rpcError) {
+      console.log(`⚠️ RPC balance failed: ${rpcError.message}`);
+      // Fallback to Etherscan
+      console.log(`🔄 Trying Etherscan API fallback...`);
+      const etherscanBalance = await getBalanceViaEtherscan(wallet.address);
+      if (etherscanBalance !== null) {
+        balanceETH = etherscanBalance;
+        console.log(`💰 Balance (Etherscan): ${balanceETH.toFixed(6)} ETH`);
+      } else {
+        throw new Error('Both RPC and Etherscan failed');
+      }
+    }
+    
+    cachedBackendBalance = balanceETH;
     lastBalanceCheck = Date.now();
     
     const status = cachedBackendBalance >= MIN_BACKEND_ETH ? '✅ FUNDED' : '❌ NEEDS FUNDING';
-    console.log(`💰 Balance: ${cachedBackendBalance.toFixed(6)} ETH (${status})`);
+    console.log(`💰 Final Balance: ${cachedBackendBalance.toFixed(6)} ETH (${status})`);
     
     if (cachedBackendBalance >= MIN_BACKEND_ETH) {
       console.log(`✅ Backend ready for HFT trading!`);
@@ -458,11 +497,17 @@ app.post('/execute', async (req, res) => {
 
 // Universal convert endpoint - REAL ETH TRANSFER from backend wallet to treasury
 app.post('/convert', async (req, res) => {
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`💸 CONVERT/WITHDRAW REQUEST`);
+  
   try {
     const { to, toAddress, amount, amountETH, amountUSD, percentage, treasury } = req.body;
     const destination = to || toAddress || treasury || BACKEND_WALLET;
     
+    console.log(`📍 Destination: ${destination}`);
+    
     if (!destination) {
+      console.log(`❌ Missing destination address`);
       return res.status(400).json({ error: 'Missing destination address' });
     }
     
@@ -470,35 +515,62 @@ app.post('/convert', async (req, res) => {
     let ethAmount = amountETH || amount;
     if (!ethAmount && amountUSD) {
       ethAmount = amountUSD / ETH_PRICE; // Use LIVE price
+      console.log(`📊 Converted $${amountUSD} → ${ethAmount.toFixed(6)} ETH @ $${ETH_PRICE}`);
     }
     
     if (!ethAmount || ethAmount <= 0) {
+      console.log(`❌ Invalid amount: ${ethAmount}`);
       return res.status(400).json({ error: 'Invalid amount' });
     }
     
+    console.log(`💰 Requested: ${ethAmount} ETH`);
+    
+    // Get wallet and check balance FIRST
+    console.log(`🔄 Connecting to wallet...`);
     const wallet = await getWallet();
+    console.log(`📡 RPC: ${connectedRpc}`);
+    console.log(`👛 Wallet: ${wallet.address}`);
+    
     const balance = await wallet.getBalance();
     const balanceETH = parseFloat(ethers.utils.formatEther(balance));
+    console.log(`💰 Current balance: ${balanceETH.toFixed(6)} ETH`);
     
     // If percentage specified, calculate from balance
     if (percentage) {
-      ethAmount = balanceETH * (percentage / 100);
+      ethAmount = (balanceETH - GAS_RESERVE) * (percentage / 100);
+      console.log(`📊 ${percentage}% of available = ${ethAmount.toFixed(6)} ETH`);
     }
     
-    if (ethAmount > balanceETH - 0.002) {
+    // Get gas estimate BEFORE checking if we have enough
+    const gasPrice = await wallet.provider.getGasPrice();
+    const gasCostWei = gasPrice.mul(21000).mul(2); // 2x for safety
+    const gasCostETH = parseFloat(ethers.utils.formatEther(gasCostWei));
+    console.log(`⛽ Estimated gas: ${gasCostETH.toFixed(6)} ETH (~$${(gasCostETH * ETH_PRICE).toFixed(2)})`);
+    
+    // Check if we have enough for amount + gas
+    const totalNeeded = ethAmount + gasCostETH;
+    if (totalNeeded > balanceETH) {
+      const maxWithdrawable = balanceETH - gasCostETH - 0.0005; // Extra tiny buffer
+      console.log(`❌ INSUFFICIENT: Need ${totalNeeded.toFixed(6)} ETH, have ${balanceETH.toFixed(6)} ETH`);
+      console.log(`💡 Max withdrawable: ${maxWithdrawable.toFixed(6)} ETH`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       return res.status(400).json({ 
-        error: 'Insufficient balance',
+        error: 'Insufficient balance (need amount + gas)',
         available: balanceETH,
         requested: ethAmount,
+        gasEstimate: gasCostETH,
+        totalNeeded: totalNeeded,
+        maxWithdrawable: maxWithdrawable > 0 ? maxWithdrawable : 0,
         ethPrice: ETH_PRICE
       });
     }
     
-    // Get current gas price
-    const gasPrice = await wallet.provider.getGasPrice();
+    console.log(`✅ Balance sufficient: ${balanceETH.toFixed(6)} ETH >= ${totalNeeded.toFixed(6)} ETH needed`);
+    
     const priorityFee = ethers.utils.parseUnits('2', 'gwei');
     
     // SEND REAL ON-CHAIN ETH TRANSACTION
+    console.log(`📤 Sending transaction...`);
     const tx = await wallet.sendTransaction({
       to: destination,
       value: ethers.utils.parseEther(ethAmount.toFixed(18)),
@@ -507,12 +579,22 @@ app.post('/convert', async (req, res) => {
       gasLimit: 21000
     });
     
-    // Wait for confirmation
-    await tx.wait(1);
+    console.log(`⏳ TX submitted: ${tx.hash}`);
+    console.log(`⏳ Waiting for confirmation...`);
     
-    console.log(`💸 REAL ETH SENT: ${ethAmount} ETH ($${(ethAmount * ETH_PRICE).toFixed(2)}) → ${destination}`);
+    // Wait for confirmation
+    const receipt = await tx.wait(1);
+    
+    const gasUsedETH = parseFloat(ethers.utils.formatEther(receipt.gasUsed.mul(receipt.effectiveGasPrice)));
+    
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`✅ TRANSACTION CONFIRMED`);
+    console.log(`💸 Sent: ${ethAmount.toFixed(6)} ETH ($${(ethAmount * ETH_PRICE).toFixed(2)})`);
+    console.log(`📍 To: ${destination}`);
     console.log(`🔗 TX: ${tx.hash}`);
-    console.log(`✅ Confirmed on-chain`);
+    console.log(`⛽ Gas used: ${gasUsedETH.toFixed(6)} ETH`);
+    console.log(`📦 Block: ${receipt.blockNumber}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     res.json({
       success: true,
@@ -521,11 +603,17 @@ app.post('/convert', async (req, res) => {
       amountUSD: ethAmount * ETH_PRICE,
       ethPrice: ETH_PRICE,
       to: destination,
+      gasUsed: gasUsedETH,
+      blockNumber: receipt.blockNumber,
       confirmed: true
     });
   } catch (e) {
-    console.error('Convert error:', e);
-    res.status(500).json({ error: e.message });
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`❌ CONVERT ERROR: ${e.message}`);
+    if (e.code) console.log(`📛 Error code: ${e.code}`);
+    if (e.reason) console.log(`📛 Reason: ${e.reason}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    res.status(500).json({ error: e.message, code: e.code, reason: e.reason });
   }
 });
 
@@ -537,25 +625,48 @@ app.post('/withdraw', async (req, res) => {
 
 // Send ETH endpoint - REAL ON-CHAIN ETH TRANSFER
 app.post('/send-eth', async (req, res) => {
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`💸 SEND-ETH REQUEST`);
+  
   try {
     const { to, amount, treasury } = req.body;
     const destination = to || treasury || BACKEND_WALLET;
     
+    console.log(`📍 To: ${destination}`);
+    console.log(`💰 Amount: ${amount} ETH`);
+    
     if (!destination || !amount) {
+      console.log(`❌ Missing to or amount`);
       return res.status(400).json({ error: 'Missing to or amount' });
     }
     
     const wallet = await getWallet();
+    console.log(`📡 RPC: ${connectedRpc}`);
+    
     const balance = await wallet.getBalance();
     const balanceETH = parseFloat(ethers.utils.formatEther(balance));
+    console.log(`💰 Balance: ${balanceETH.toFixed(6)} ETH`);
     
-    if (amount > balanceETH - 0.002) {
-      return res.status(400).json({ error: 'Insufficient balance', available: balanceETH });
+    // Get gas estimate
+    const gasPrice = await wallet.provider.getGasPrice();
+    const gasCostWei = gasPrice.mul(21000).mul(2);
+    const gasCostETH = parseFloat(ethers.utils.formatEther(gasCostWei));
+    console.log(`⛽ Gas estimate: ${gasCostETH.toFixed(6)} ETH`);
+    
+    const totalNeeded = parseFloat(amount) + gasCostETH;
+    if (totalNeeded > balanceETH) {
+      console.log(`❌ INSUFFICIENT: Need ${totalNeeded.toFixed(6)}, have ${balanceETH.toFixed(6)}`);
+      return res.status(400).json({ 
+        error: 'Insufficient balance (need amount + gas)', 
+        available: balanceETH,
+        requested: amount,
+        gasEstimate: gasCostETH,
+        totalNeeded
+      });
     }
     
-    const gasPrice = await wallet.provider.getGasPrice();
-    
     // REAL ON-CHAIN TRANSACTION
+    console.log(`📤 Sending...`);
     const tx = await wallet.sendTransaction({
       to: destination,
       value: ethers.utils.parseEther(amount.toString()),
@@ -564,9 +675,11 @@ app.post('/send-eth', async (req, res) => {
       gasLimit: 21000
     });
     
-    await tx.wait(1);
+    console.log(`⏳ TX: ${tx.hash}`);
+    const receipt = await tx.wait(1);
     
-    console.log(`💸 REAL ETH: ${amount} ETH → ${destination} | TX: ${tx.hash}`);
+    console.log(`✅ CONFIRMED in block ${receipt.blockNumber}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     res.json({ 
       success: true, 
@@ -574,10 +687,13 @@ app.post('/send-eth', async (req, res) => {
       amount,
       amountUSD: amount * ETH_PRICE,
       ethPrice: ETH_PRICE,
+      blockNumber: receipt.blockNumber,
       confirmed: true
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.log(`❌ SEND-ETH ERROR: ${e.message}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    res.status(500).json({ error: e.message, code: e.code });
   }
 });
 
@@ -595,34 +711,55 @@ app.post('/coinbase-withdraw', (req, res) => {
 
 // Fund from earnings (recycle) - REAL ETH CONVERSION TO TREASURY
 app.post('/fund-from-earnings', async (req, res) => {
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`♻️ FUND-FROM-EARNINGS REQUEST`);
+  
   try {
     const { amountETH, amountUSD, treasury, to } = req.body;
     const destination = treasury || to || BACKEND_WALLET;
     
+    console.log(`📍 Destination: ${destination}`);
+    
     let ethAmount = amountETH;
     if (!ethAmount && amountUSD) {
       ethAmount = amountUSD / ETH_PRICE; // Use LIVE price
+      console.log(`📊 Converted $${amountUSD} → ${ethAmount.toFixed(6)} ETH`);
     }
     
     if (!ethAmount || ethAmount <= 0) {
+      console.log(`❌ Invalid amount`);
       return res.status(400).json({ error: 'Invalid amount' });
     }
     
+    console.log(`💰 Amount: ${ethAmount.toFixed(6)} ETH`);
+    
     const wallet = await getWallet();
+    console.log(`📡 RPC: ${connectedRpc}`);
+    
     const balance = await wallet.getBalance();
     const balanceETH = parseFloat(ethers.utils.formatEther(balance));
+    console.log(`💰 Balance: ${balanceETH.toFixed(6)} ETH`);
     
-    if (ethAmount > balanceETH - 0.001) {
+    // Get gas estimate
+    const gasPrice = await wallet.provider.getGasPrice();
+    const gasCostWei = gasPrice.mul(21000).mul(2);
+    const gasCostETH = parseFloat(ethers.utils.formatEther(gasCostWei));
+    console.log(`⛽ Gas estimate: ${gasCostETH.toFixed(6)} ETH`);
+    
+    const totalNeeded = ethAmount + gasCostETH;
+    if (totalNeeded > balanceETH) {
+      console.log(`❌ INSUFFICIENT: Need ${totalNeeded.toFixed(6)}, have ${balanceETH.toFixed(6)}`);
       return res.status(400).json({ 
-        error: 'Insufficient backend balance',
+        error: 'Insufficient backend balance (need amount + gas)',
         available: balanceETH,
-        requested: ethAmount
+        requested: ethAmount,
+        gasEstimate: gasCostETH,
+        totalNeeded
       });
     }
     
-    const gasPrice = await wallet.provider.getGasPrice();
-    
     // SEND REAL ETH TO TREASURY/BACKEND WALLET
+    console.log(`📤 Sending...`);
     const tx = await wallet.sendTransaction({
       to: destination,
       value: ethers.utils.parseEther(ethAmount.toFixed(18)),
@@ -631,10 +768,15 @@ app.post('/fund-from-earnings', async (req, res) => {
       gasLimit: 21000
     });
     
-    await tx.wait(1);
+    console.log(`⏳ TX: ${tx.hash}`);
+    const receipt = await tx.wait(1);
     
-    console.log(`♻️ RECYCLED: $${amountUSD || (ethAmount * ETH_PRICE)} → ${ethAmount} ETH to treasury`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`✅ RECYCLED SUCCESSFULLY`);
+    console.log(`💰 ${ethAmount.toFixed(6)} ETH ($${(ethAmount * ETH_PRICE).toFixed(2)}) → treasury`);
     console.log(`🔗 TX: ${tx.hash}`);
+    console.log(`📦 Block: ${receipt.blockNumber}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     res.json({
       success: true,
@@ -643,10 +785,13 @@ app.post('/fund-from-earnings', async (req, res) => {
       amountUSD: ethAmount * ETH_PRICE,
       ethPrice: ETH_PRICE,
       destination,
+      blockNumber: receipt.blockNumber,
       confirmed: true
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.log(`❌ FUND-FROM-EARNINGS ERROR: ${e.message}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    res.status(500).json({ error: e.message, code: e.code });
   }
 });
 
