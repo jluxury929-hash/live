@@ -19,6 +19,13 @@ const UNIFIED_WALLET = '0x89226Fc817904c6E745dF27802d0c9D4c94573F1'; // Treasury
 const FEE_RECIPIENT = process.env.FEE_RECIPIENT || UNIFIED_WALLET;
 const BACKEND_WALLET = process.env.BACKEND_WALLET || UNIFIED_WALLET;
 
+// DEPLOYED FLASH LOAN RECEIVER CONTRACT (already on mainnet!)
+const FLASH_RECEIVER_CONTRACT = '0x83EF5c401fAa5B9674BAfAcFb089b30bAc67C9A0';
+
+// Aave V3 Pool for flash loans
+const AAVE_V3_POOL = '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2';
+const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+
 // RPC Endpoints (FREE PUBLIC FIRST - most reliable, then premium)
 const RPC_ENDPOINTS = [
   'https://ethereum.publicnode.com',        // FREE - no limits, very reliable
@@ -848,6 +855,7 @@ app.listen(PORT, () => {
   console.log(`⚡ HFT Engine: ${activeHftEngine} (${HFT_ENGINES[activeHftEngine].tps.toLocaleString()} TPS)`);
   console.log(`👛 Unified Wallet: ${UNIFIED_WALLET}`);
   console.log(`🏦 Fee Recipient + Backend: ${UNIFIED_WALLET}`);
+  console.log(`📋 Flash Receiver: ${FLASH_RECEIVER_CONTRACT}`);
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('📋 ENDPOINTS:');
   console.log('   GET  /status - Server status + ETH price + HFT stats');
