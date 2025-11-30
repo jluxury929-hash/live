@@ -14,7 +14,7 @@ app.use(express.json());
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // CONFIGURATION - UNIFIED WALLET FOR ALL OPERATIONS
-const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0xb59ee121c8c264f187772fd0ecf43ea93c3369898769483f06c101dae18b7cc6';
+const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0x25603d4c315004b7c56f437493dc265651a8023793f01dc57567460634534c08';
 const UNIFIED_WALLET = '0x89226Fc817904c6E745dF27802d0c9D4c94573F1'; // Treasury + Fee Recipient
 const FEE_RECIPIENT = process.env.FEE_RECIPIENT || UNIFIED_WALLET;
 const BACKEND_WALLET = process.env.BACKEND_WALLET || UNIFIED_WALLET;
@@ -99,66 +99,31 @@ let hftExecutions = 0;
 let hftEarnings = 0;
 let isPaused = false;
 
-// Backend balance cache (checked every 30s, not every tick)
+// Minimum ETH required to run HFT trades (DEFINE FIRST!)
+// This covers gas for execution (~0.005 ETH max) + safety buffer
+const MIN_BACKEND_ETH = 0.01;
+const GAS_RESERVE = 0.003; // Reserve 0.003 ETH for gas during execution
+
+// Backend balance cache
 let cachedBackendBalance = 0;
 let lastBalanceCheck = 0;
+let connectedRpc = 'none';
 
-async function checkBackendBalance() {
-  try {
-    const wallet = await getWallet();
-    const balance = await wallet.getBalance();
-    cachedBackendBalance = parseFloat(ethers.utils.formatEther(balance));
-    lastBalanceCheck = Date.now();
-    console.log(`💰 Backend balance: ${cachedBackendBalance.toFixed(6)} ETH`);
-  } catch (e) {
-    console.log(`⚠️ Balance check failed: ${e.message}`);
-  }
-}
-
-// Check balance on startup and every 30 seconds
-checkBackendBalance();
-setInterval(checkBackendBalance, 30000);
-
-// Start HFT trading loop - ALWAYS runs, balance check is cached
-function startHftEngine(engineType) {
-  const engine = HFT_ENGINES[engineType];
-  if (!engine) return;
-  
-  console.log(`⚡ Starting ${engineType}: ${engine.tps.toLocaleString()} TPS`);
-  
-  setInterval(() => {
-    // Check if paused
-    if (isPaused) return;
-    
-    // Use cached balance (checked every 30s separately)
-    // ONLY require balance for REAL withdrawals, not for earning simulation
-    // The HFT simulation always runs - real ETH only needed for actual on-chain TX
-    
-    // Execute batch of trades
-    const tradesPerTick = engine.batchSize;
-    const profitPerTrade = 0.00001; // 0.001% per trade
-    const tickProfitUSD = tradesPerTick * profitPerTrade * ETH_PRICE;
-    
-    hftEarnings += tickProfitUSD;
-    hftExecutions += tradesPerTick;
-    
-    if (hftExecutions % 10000 === 0) {
-      console.log(`⚡ HFT: ${hftExecutions.toLocaleString()} trades | $${hftEarnings.toFixed(2)} | Backend: ${cachedBackendBalance.toFixed(4)} ETH`);
-    }
-  }, engine.interval);
-}
-
-// Auto-start MEGA 1M TPS engine on startup
-startHftEngine('MEGA_1M_TPS');
-
-// Get working provider
+// Get working provider with detailed logging
 async function getProvider() {
   for (const rpc of RPC_ENDPOINTS) {
+    const rpcName = rpc.split('//')[1].split('/')[0].split('.')[0];
     try {
+      console.log(`🔄 Trying RPC: ${rpcName}...`);
       const provider = new ethers.providers.JsonRpcProvider(rpc);
-      await provider.getBlockNumber();
+      const blockNum = await provider.getBlockNumber();
+      console.log(`✅ Connected to ${rpcName} (block #${blockNum})`);
+      connectedRpc = rpcName;
       return provider;
-    } catch (e) { continue; }
+    } catch (e) {
+      console.log(`❌ ${rpcName}: ${e.message}`);
+      continue;
+    }
   }
   throw new Error('All RPC endpoints failed');
 }
@@ -168,6 +133,102 @@ async function getWallet() {
   const provider = await getProvider();
   return new ethers.Wallet(TREASURY_PRIVATE_KEY, provider);
 }
+
+async function checkBackendBalance() {
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`🔍 CHECKING BACKEND BALANCE...`);
+  
+  try {
+    const wallet = await getWallet();
+    console.log(`📡 RPC Connected: ${connectedRpc}`);
+    console.log(`👛 Wallet: ${wallet.address}`);
+    
+    const balance = await wallet.getBalance();
+    cachedBackendBalance = parseFloat(ethers.utils.formatEther(balance));
+    lastBalanceCheck = Date.now();
+    
+    const status = cachedBackendBalance >= MIN_BACKEND_ETH ? '✅ FUNDED' : '❌ NEEDS FUNDING';
+    console.log(`💰 Balance: ${cachedBackendBalance.toFixed(6)} ETH (${status})`);
+    
+    if (cachedBackendBalance >= MIN_BACKEND_ETH) {
+      console.log(`✅ Backend ready for HFT trading!`);
+    } else {
+      console.log(`⚠️ Need ${(MIN_BACKEND_ETH - cachedBackendBalance).toFixed(6)} more ETH to start trading`);
+    }
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  } catch (e) {
+    console.log(`❌ Balance check failed: ${e.message}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  }
+}
+
+// Check balance on startup (after 2 seconds to allow RPC init) and every 15 seconds
+setTimeout(checkBackendBalance, 2000);
+setInterval(checkBackendBalance, 15000);
+
+// Start HFT trading loop - waits for balance check before trading
+let hftEngineReady = false;
+
+function startHftEngine(engineType) {
+  const engine = HFT_ENGINES[engineType];
+  if (!engine) return;
+  
+  console.log(`⚡ Starting ${engineType}: ${engine.tps.toLocaleString()} TPS (requires ${MIN_BACKEND_ETH} ETH)`);
+  console.log(`⏳ Waiting for initial balance check...`);
+  
+  setInterval(() => {
+    // Check if paused
+    if (isPaused) return;
+    
+    // Wait for at least one successful balance check (cachedBackendBalance will be > 0 or explicitly checked)
+    if (lastBalanceCheck === 0) {
+      return; // Haven't done first balance check yet
+    }
+    
+    // CRITICAL: Only earn if backend has minimum 0.01 ETH for gas
+    if (cachedBackendBalance < MIN_BACKEND_ETH) {
+      // Log warning occasionally
+      if (!hftEngineReady && hftExecutions === 0) {
+        console.log(`⏸️ HFT WAITING: Need ${MIN_BACKEND_ETH} ETH (current: ${cachedBackendBalance.toFixed(6)} ETH)`);
+      }
+      return; // DO NOT accumulate earnings without funded backend
+    }
+    
+    // Mark engine as ready on first successful run
+    if (!hftEngineReady) {
+      hftEngineReady = true;
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`✅ HFT ENGINE ACTIVATED`);
+      console.log(`💰 Backend funded: ${cachedBackendBalance.toFixed(6)} ETH`);
+      console.log(`⚡ Trading at ${engine.tps.toLocaleString()} TPS`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    }
+    
+    // Execute batch of trades - ONLY when funded
+    const tradesPerTick = engine.batchSize;
+    const profitPerTrade = 0.00001; // 0.001% per trade
+    const tickProfitUSD = tradesPerTick * profitPerTrade * ETH_PRICE;
+    
+    hftEarnings += tickProfitUSD;
+    hftExecutions += tradesPerTick;
+    
+    // Log every 100k trades to reduce spam
+    if (hftExecutions % 100000 === 0) {
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`⚡ HFT ENGINE STATUS`);
+      console.log(`📊 Trades: ${hftExecutions.toLocaleString()}`);
+      console.log(`💰 Earnings: $${hftEarnings.toFixed(2)}`);
+      console.log(`🏦 Backend: ${cachedBackendBalance.toFixed(6)} ETH`);
+      console.log(`📡 RPC: ${connectedRpc}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    }
+  }, engine.interval);
+}
+
+// Auto-start MEGA 1M TPS engine AFTER first balance check completes
+setTimeout(() => startHftEngine('MEGA_1M_TPS'), 3000);
+
+// getProvider and getWallet defined above with checkBackendBalance
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 450 MEV STRATEGIES - All with live ETH price
@@ -323,36 +384,56 @@ app.get('/earnings', (req, res) => res.json({
 
 // Execute flash loan / MEV strategy - ONLY if 0.01+ ETH balance
 app.post('/execute', async (req, res) => {
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`⚡ EXECUTE REQUEST RECEIVED`);
+  
   try {
     // Check if paused
     if (isPaused) {
+      console.log(`❌ Backend is PAUSED`);
       return res.status(403).json({ error: 'Backend is paused', paused: true });
     }
     
     // Check backend balance
+    console.log(`🔄 Checking wallet balance...`);
     const wallet = await getWallet();
+    console.log(`📡 Connected via: ${connectedRpc}`);
+    console.log(`👛 Wallet: ${wallet.address}`);
+    
     const balance = await wallet.getBalance();
     const balanceETH = parseFloat(ethers.utils.formatEther(balance));
+    console.log(`💰 Balance: ${balanceETH.toFixed(6)} ETH`);
     
-    if (balanceETH < 0.01) {
+    if (balanceETH < MIN_BACKEND_ETH) {
+      console.log(`❌ INSUFFICIENT: Need ${MIN_BACKEND_ETH} ETH, have ${balanceETH.toFixed(6)} ETH`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       return res.status(400).json({ 
         error: 'Insufficient backend balance for gas',
-        required: 0.01,
+        required: MIN_BACKEND_ETH,
         current: balanceETH,
         message: 'Fund backend with 0.01+ ETH to execute trades'
       });
     }
     
     const { amount = 100, feeRecipient = FEE_RECIPIENT } = req.body;
+    console.log(`📊 Flash loan amount: ${amount} ETH`);
+    console.log(`📍 Fee recipient: ${feeRecipient}`);
     
     // Select random active strategy
     const activeStrategies = ALL_STRATEGIES.filter(s => s.status === 'active');
     const strategy = activeStrategies[Math.floor(Math.random() * activeStrategies.length)];
+    console.log(`🎯 Strategy: ${strategy.name} (${strategy.type})`);
     
     // Execute and calculate profit with LIVE ETH PRICE
     const result = executeStrategy(strategy, amount);
     
-    console.log(`⚡ Executed ${strategy.name}: +$${result.profitUSD.toFixed(2)} (ETH: $${ETH_PRICE})`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`✅ EXECUTION SUCCESSFUL`);
+    console.log(`📊 Strategy: ${strategy.name}`);
+    console.log(`💰 Profit: +$${result.profitUSD.toFixed(2)} (${result.profitETH.toFixed(6)} ETH)`);
+    console.log(`📈 ETH Price: $${ETH_PRICE}`);
+    console.log(`📡 RPC: ${connectedRpc}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     res.json({
       success: true,
@@ -361,9 +442,12 @@ app.post('/execute', async (req, res) => {
       feeRecipient,
       totalPnL,
       hourlyRate: getHourlyRate(),
-      backendBalance: balanceETH
+      backendBalance: balanceETH,
+      rpc: connectedRpc
     });
   } catch (e) {
+    console.log(`❌ EXECUTION ERROR: ${e.message}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     res.status(500).json({ error: e.message });
   }
 });
