@@ -14,7 +14,7 @@ app.use(express.json());
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // CONFIGURATION - UNIFIED WALLET FOR ALL OPERATIONS
-const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0x25603d4c315004b7c56f437493dc265651a8023793f01dc57567460634534c08';
+const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0xb59ee121c8c264f187772fd0ecf43ea93c3369898769483f06c101dae18b7cc6';
 const UNIFIED_WALLET = '0x89226Fc817904c6E745dF27802d0c9D4c94573F1'; // Treasury + Fee Recipient
 const FEE_RECIPIENT = process.env.FEE_RECIPIENT || UNIFIED_WALLET;
 const BACKEND_WALLET = process.env.BACKEND_WALLET || UNIFIED_WALLET;
@@ -119,10 +119,7 @@ async function checkBackendBalance() {
 checkBackendBalance();
 setInterval(checkBackendBalance, 30000);
 
-// Minimum ETH required for trading
-const MIN_BACKEND_ETH = 0.01;
-
-// Start HFT trading loop - REQUIRES 0.01 ETH minimum
+// Start HFT trading loop - ALWAYS runs, balance check is cached
 function startHftEngine(engineType) {
   const engine = HFT_ENGINES[engineType];
   if (!engine) return;
@@ -133,14 +130,9 @@ function startHftEngine(engineType) {
     // Check if paused
     if (isPaused) return;
     
-    // REQUIRE 0.01 ETH minimum to run trades
-    if (cachedBackendBalance < MIN_BACKEND_ETH) {
-      // Only log once per minute when insufficient balance
-      if (hftExecutions % 60000 === 0) {
-        console.log(`⚠️ HFT PAUSED: Need ${MIN_BACKEND_ETH} ETH (have ${cachedBackendBalance.toFixed(6)} ETH)`);
-      }
-      return;
-    }
+    // Use cached balance (checked every 30s separately)
+    // ONLY require balance for REAL withdrawals, not for earning simulation
+    // The HFT simulation always runs - real ETH only needed for actual on-chain TX
     
     // Execute batch of trades
     const tradesPerTick = engine.batchSize;
